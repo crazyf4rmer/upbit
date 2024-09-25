@@ -10,8 +10,6 @@ from dotenv import load_dotenv
 from datetime import datetime, timedelta, timezone
 from contextlib import contextmanager
 import threading
-import pandas as pd
-import numpy as np
 from decimal import Decimal, ROUND_UP
 from logging.handlers import RotatingFileHandler
 
@@ -48,7 +46,7 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 # 시드 금액 설정
-SEED_AMOUNT = 300000.0  # 단위: KRW
+SEED_AMOUNT = 100000.0  # 단위: KRW
 
 # 수익률 설정 (0.5%)
 PROFIT_TARGET_RATE = 0.005  # 0.5% 상승 시
@@ -274,16 +272,15 @@ def place_order(market, side, volume, price, linked_order_id=None, ord_type='lim
         'market': market,
         'side': side,
         'volume': str(volume),  # 문자열로 변환
-        'price': str(price) if price else None,    # 문자열로 변환, 시장가 주문 시 price는 None
         'ord_type': ord_type,
     }
 
     # 가격이 None인 경우 키를 제거하여 시장가 주문으로 설정
-    if price is None:
-        del params['price']
+    if price is not None:
+        params['price'] = str(price)  # 문자열로 변환
 
     if linked_order_id:
-        params['linked_order_id'] = linked_order_id  # 매도 주문이 매수 주문과 연결되었음을 표시
+        params['identifier'] = linked_order_id  # 링크된 주문 ID 사용
 
     # URL 인코딩된 쿼리 문자열 생성 (unquote 사용)
     query_string = unquote(urlencode(params, doseq=True)).encode("utf-8")
@@ -996,537 +993,6 @@ def monitor_average_price_and_take_profit_and_stop_loss():
             logger.debug(f"손절 및 수익 실현 관리 중 오류 발생: {e}")
             time.sleep(30)
 
-# 주문서를 취소하고 매도 주문을 재분배하는 함수
-def cancel_unfilled_sells_if_no_fills():
-    """
-    3분 간격으로 매도 주문이 하나도 체결되지 않았다면, 가장 오래된 미체결 매도 주문 2개(가능하면)를 취소하고 일반 매매를 재개합니다.
-    또는
-    만약 지정가 매수 주문이 없을 경우, 가장 멀리 있는 미체결 매도 주문 2개(가능하면)를 취소하고 해당 주문금액만큼 시장가로 던져서 매도한 뒤 일반 매매를 지속합니다.
-    """
-    market = 'KRW-SEI'
-    check_interval = 180  # 3분 (초 단위)
-
-    while True:
-        try:
-            time.sleep(check_interval)  # 3분 대기
-
-            with last_sell_fill_time_lock:
-                time_since_last_sell_fill = datetime.now(timezone.utc) - last_sell_fill_time
-
-            if time_since_last_sell_fill < timedelta(minutes=3):
-                # 최근 3분 이내에 매도 주문이 체결되었으므로 취소하지 않음
-                logger.debug("최근 3분 내에 매도 주문이 체결되었습니다. 취소 작업을 건너뜁니다.")
-                continue
-
-            with open_order_lock():
-                # 현재 미체결 매수 주문 목록 가져오기
-                open_buy_orders = [order for order in get_open_orders() if order.get('side') == 'bid']
-
-                if open_buy_orders:
-                    # 매수 주문이 있는 경우, 가장 오래된 2개 취소
-                    open_buy_orders_sorted = sorted(open_buy_orders, key=lambda x: parse_created_at(x.get('created_at')), reverse=False)
-                    orders_to_cancel = open_buy_orders_sorted[:2]
-
-                    for order in orders_to_cancel:
-                        order_id = order.get('uuid')
-                        price = float(order.get('price', 0))
-                        volume = float(order.get('volume', 0))
-                        if order_id:
-                            logger.info(f"체결되지 않은 매수 주문을 취소합니다: 주문 ID {order_id}, 가격: {price:.2f}원, 수량: {volume} SEI")
-                            cancel_response = cancel_order(order_id)
-                            if cancel_response and 'uuid' in cancel_response:
-                                logger.info(f"매수 주문 취소됨: 주문 ID {order_id}")
-                                # 투자 금액 복구
-                                buy_amount = price * volume
-                                with totals_lock:
-                                    global total_invested
-                                    total_invested -= buy_amount
-                                    if total_invested < 0:
-                                        logger.warning(f"총 투자 금액이 음수가 되었습니다: {total_invested}. 0으로 초기화합니다.")
-                                        total_invested = 0.0
-                            else:
-                                logger.warning(f"매수 주문 취소 실패: 주문 ID {order_id}")
-                else:
-                    # 매수 주문이 없는 경우, 가장 멀리 있는 매도 주문 2개 취소 후 시장가 매도
-                    if not sell_orders:
-                        logger.debug("취소할 매도 주문이 없습니다.")
-                        continue
-
-                    # 가장 멀리 있는 (가격 기준) 매도 주문 2개 선택
-                    open_sell_orders_sorted = sorted(sell_orders.items(), key=lambda x: x[1]['target_price'], reverse=True)
-                    orders_to_cancel = open_sell_orders_sorted[:2]
-
-                    for buy_id, sell_info in orders_to_cancel:
-                        sell_id = sell_info['sell_order_id']
-                        sell_price = sell_info['target_price']
-                        volume = sell_info['volume']
-                        if sell_id:
-                            logger.info(f"체결되지 않은 매도 주문을 취소하고 시장가로 매도합니다: 주문 ID {sell_id}, 가격: {sell_price:.2f}원, 수량: {volume} SEI")
-                            cancel_response = cancel_order(sell_id)
-                            if cancel_response and 'uuid' in cancel_response:
-                                logger.info(f"매도 주문 취소됨: 주문 ID {sell_id}")
-                                # 시장가 매도 주문 실행
-                                market_sell_response = place_order('KRW-SEI', 'ask', volume, None, linked_order_id=None, ord_type='price')
-                                if market_sell_response and 'uuid' in market_sell_response:
-                                    market_sell_id = market_sell_response['uuid']
-                                    logger.info(f"시장가 매도 주문 생성됨: 주문 ID {market_sell_id}, 수량: {volume} SEI")
-                                    # sell_orders에서 제거
-                                    del sell_orders[buy_id]
-                                else:
-                                    logger.warning(f"시장가 매도 주문 생성 실패: 주문 ID {sell_id}, 수량: {volume} SEI")
-                            else:
-                                logger.warning(f"매도 주문 취소 실패: 주문 ID {sell_id}")
-        except Exception as e:
-            logger.debug(f"미체결 매도 주문 취소 중 오류 발생: {e}")
-
-# 주문서 데이터 처리 함수
-def process_orderbook(orderbook):
-    try:
-        orderbook_units = orderbook['orderbook_units']
-        bids = []
-        asks = []
-        for unit in orderbook_units:
-            bids.append({'price': float(unit['bid_price']), 'size': float(unit['bid_size'])})
-            asks.append({'price': float(unit['ask_price']), 'size': float(unit['ask_size'])})
-        return bids, asks
-    except (KeyError, TypeError, IndexError, ValueError) as e:
-        logger.debug(f"주문서 데이터 처리 중 오류 발생: {e}")
-        return None, None
-
-# 실시간 시장 데이터 가져오기 함수
-def fetch_orderbook(market):
-    url = f"{server_url}/v1/orderbook"
-    params = {'markets': market}
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        orderbook_data = response.json()
-        return orderbook_data[0] if orderbook_data else None
-    except requests.exceptions.Timeout:
-        logger.debug(f"주문서 가져오기 요청 타임아웃: 시장 {market}")
-    except Exception as e:
-        logger.debug(f"주문서 가져오기 중 오류 발생: {e}")
-        return None
-
-# 현재 시장 가격 가져오기 함수 추가
-def get_current_market_price(market):
-    orderbook = fetch_orderbook(market)
-    if not orderbook:
-        logger.debug("현재 시장 가격 가져오기 실패.")
-        return None
-    bids, asks = process_orderbook(orderbook)
-    if not bids or not asks:
-        logger.debug("현재 시장 호가 처리 실패.")
-        return None
-    best_bid = bids[0]['price']
-    best_ask = asks[0]['price']
-    current_price = (best_bid + best_ask) / 2
-    return current_price
-
-# 매수 주문이 체결되면 매도 주문을 생성하는 함수
-def wait_and_place_sell_order(buy_order_id, buy_price, volume):
-    """
-    매수 주문이 체결되면 매도 주문을 생성하는 함수
-    """
-    global trade_in_progress
-    while True:
-        status = check_order_status(buy_order_id, 'bid')
-        if status:
-            state = status.get('state')
-            if state == 'done':
-                # 매도 주문 실행
-                response_sell = place_sell_order_on_buy(buy_order_id, buy_price, volume)
-                if response_sell:
-                    logger.info(f"매도 주문이 성공적으로 생성되었습니다: 주문 ID {response_sell.get('uuid')}")
-                    
-                    # 매도 주문이 체결될 때까지 기다림 (monitor_sell_orders에서 처리)
-                    
-                    # 매수 주문이 체결되었으므로 total_position 업데이트
-                    with position_lock:
-                        total_position['total_volume'] += float(volume)
-                        total_position['total_cost'] += float(buy_price) * float(volume)
-                        if total_position['total_volume'] > 0:
-                            total_position['average_price'] = total_position['total_cost'] / total_position['total_volume']
-                        else:
-                            total_position['average_price'] = 0
-                        logger.debug(f"매수 주문 체결: 가격 {buy_price:.2f}원, 수량: {volume} SEI, 평균 매수가: {total_position['average_price']:.2f}원")
-                else:
-                    logger.debug(f"매도 주문 생성 실패: 매수 주문 ID {buy_order_id}")
-                break
-            elif state in ['cancelled', 'failed']:
-                logger.info(f"매수 주문이 취소되거나 실패했습니다: 주문 ID {buy_order_id}, 상태: {state}")
-                with trade_lock:
-                    trade_in_progress = False
-                break
-        time.sleep(5)  # 5초 간격으로 상태 확인
-
-# 마켓 메이킹 매수 주문 배치 함수 추가
-def place_grid_buy_orders(base_price, tick_size, levels):
-    global total_invested  # 전역 변수 사용
-    buy_prices = [base_price - (i * tick_size) for i in range(1, levels + 1)]
-    for price in buy_prices:
-        # 기존 주문과 중복되지 않도록 확인
-        existing_buy_prices = {float(order.get('price')) for order in get_open_orders() if order.get('side') == 'bid'}
-        if price in existing_buy_prices:
-            logger.debug(f"이미 매수 주문이 걸려있는 가격: {price:.2f}원")
-            continue
-
-        # 매수 시 사용할 금액 설정 (예: 시드 금액의 일정 비율)
-        buy_amount = SEED_AMOUNT / (levels * 2)  # 시드 금액을 레벨 수의 두 배로 나눠 각 주문에 배정
-        current_balance = get_current_krw_balance()
-
-        # 남은 시드 금액 계산
-        remaining_seed = SEED_AMOUNT - total_invested
-        if remaining_seed <= 0:
-            logger.info(f"시드 금액 {SEED_AMOUNT}원을 모두 투자했습니다. 추가 매수는 더 이상 진행되지 않습니다.")
-            break
-
-        # 매수 금액이 남은 시드 금액과 현재 잔고를 초과하지 않도록 조정
-        adjusted_buy_amount = min(buy_amount, remaining_seed, current_balance)
-
-        # 최소 주문 금액 검증
-        if adjusted_buy_amount < MIN_BUY_AMOUNT_KRW:
-            logger.debug(f"매수 금액 {adjusted_buy_amount:.2f} KRW이 최소 주문 금액 {MIN_BUY_AMOUNT_KRW} KRW을 충족하지 못해서 매수 주문을 걸지 않습니다.")
-            continue
-
-        volume = adjusted_buy_amount / price
-        volume = round(volume, 6)  # 소수점 자리수 조정
-
-        with open_order_lock():
-            response_buy = place_order('KRW-SEI', 'bid', volume, price)
-            if response_buy and 'uuid' in response_buy:
-                buy_order_id = response_buy['uuid']
-                logger.debug(f"매수 주문 체결 대기: 매수 가격 {price:.2f}원, 수량: {volume} SEI, 주문 ID {buy_order_id}")
-                threading.Thread(target=wait_and_place_sell_order, args=(buy_order_id, price, volume), daemon=True).start()
-                # 투자 금액 누적
-                with totals_lock:
-                    total_invested += adjusted_buy_amount
-            else:
-                logger.debug(f"매수 주문 실행 실패 (매수 주문 ID 없음).")
-
-# 마켓 메이킹 매도 주문 배치 함수 추가
-def place_grid_sell_orders(base_price, tick_size, levels):
-    """
-    마켓 메이킹을 위한 그리드 매도 주문을 배치하는 함수
-    """
-    sell_prices = [base_price + (i * tick_size) for i in range(1, levels + 1)]
-    current_sei_balance = get_current_sei_balance()
-
-    for price in sell_prices:
-        # 기존 주문과 중복되지 않도록 확인
-        existing_sell_prices = {float(order.get('price')) for order in get_open_orders() if order.get('side') == 'ask'}
-        if price in existing_sell_prices:
-            logger.debug(f"이미 매도 주문이 걸려있는 가격: {price:.2f}원")
-            continue
-
-        # 매도 시 물량 설정 (보유 SEI의 일정 비율)
-        sell_volume = current_sei_balance / (levels * 2)  # 보유 SEI를 레벨 수의 두 배로 나눠 각 주문에 배정
-        sell_volume = round(sell_volume, 6)
-
-        # 최소 매도 수량 검증
-        if sell_volume < MIN_SELL_VOLUME:
-            logger.debug(f"매도 물량 {sell_volume} SEI가 최소 매도 수량 {MIN_SELL_VOLUME} SEI을 충족하지 못해 매도 주문을 걸지 않습니다.")
-            continue
-
-        # 매도 금액 검증
-        total_sell_amount = price * sell_volume
-        if total_sell_amount < MIN_BUY_AMOUNT_KRW:
-            logger.debug(f"매도 금액 {total_sell_amount:.2f} KRW이 최소 주문 금액 {MIN_BUY_AMOUNT_KRW} KRW을 충족하지 않아서 매도 주문을 걸지 않습니다.")
-            continue
-
-        with open_order_lock():
-            response_sell = place_order('KRW-SEI', 'ask', sell_volume, price, linked_order_id=None, ord_type='limit')
-            if response_sell and 'uuid' in response_sell:
-                sell_order_id = response_sell['uuid']
-                logger.debug(f"매도 주문 생성됨: {price:.2f}원, 수량: {sell_volume} SEI, 주문 ID {sell_order_id}")
-            else:
-                logger.debug(f"매도 주문 실행 실패 (매도 주문 ID 없음).")
-
-# 전체 매도 주문을 지정가로 매도하고 모니터링하는 함수
-def take_profit_and_monitor():
-    """
-    설정한 수익률에 도달했을 때 기존 매도 주문을 취소하고, 지정가 매도 주문을 걸어두는 함수
-    """
-    global total_position, sell_orders
-    with position_lock:
-        average_price = total_position['average_price']
-        total_volume = total_position['total_volume']
-
-    if total_volume == 0:
-        # 보유 물량이 없으면 종료
-        return
-
-    # 0.5% 수익 실현 가격 계산
-    take_profit_price = average_price * (1 + PROFIT_TARGET_RATE)
-
-    logger.info(f"수익 실현을 위해 모든 매도 주문을 취소하고, 가격 {take_profit_price:.2f}원으로 지정가 매도 주문을 걸어둡니다.")
-
-    # 모든 기존 매도 주문 취소
-    cancel_all_sell_orders()
-
-    # 현재 보유 SEI 잔량 조회
-    current_sei_balance = get_current_sei_balance()
-    if current_sei_balance < MIN_SELL_VOLUME:
-        logger.warning(f"보유 SEI 수량 {current_sei_balance} SEI이 최소 매도 수량 {MIN_SELL_VOLUME} SEI을 충족하지 못합니다.")
-        return
-
-    # 지정가 매도 주문 생성
-    response_sell = place_order('KRW-SEI', 'ask', current_sei_balance, take_profit_price, ord_type='limit')
-
-    if response_sell and 'uuid' in response_sell:
-        sell_order_id = response_sell['uuid']
-        sell_orders[f"profit_sell_{sell_order_id}"] = {
-            'sell_order_id': sell_order_id,
-            'buy_price': average_price,
-            'volume': current_sei_balance,
-            'target_price': take_profit_price,
-            'created_at': datetime.now(timezone.utc)
-        }
-        logger.info(f"수익 실현 매도 주문 생성됨: 주문 ID {sell_order_id}, 가격: {take_profit_price:.2f}원, 수량: {current_sei_balance} SEI")
-    else:
-        logger.warning("수익 실현 매도 주문 생성 실패.")
-
-# 주문서를 취소하고 매도 주문을 재분배하는 함수
-def redistribute_sell_orders(buy_id, original_sell_price, volume):
-    """
-    매도 주문 가격이 설정된 비율 이상 하락 시, 매도 주문을 재분배하는 함수
-    """
-    current_market_price = get_current_market_price('KRW-SEI')
-    if current_market_price is None:
-        logger.warning("현재 시장 가격을 가져올 수 없어 매도 주문 재분배를 진행할 수 없습니다.")
-        return
-
-    # 새로운 매도 주문 가격을 현재 시장 가격으로 설정
-    target_price = current_market_price
-
-    logger.info(f"현재 시장 가격이 매도 가격보다 {ADDITIONAL_STOP_LOSS_RATE*100}% 이상 하락하였습니다: {current_market_price:.2f}원 <= {original_sell_price:.2f}원")
-    logger.info(f"매도 주문을 재분배합니다. 새로운 매도 가격: {target_price:.2f}원")
-
-    # 기존 매도 주문 취소
-    sell_info = sell_orders.get(buy_id)
-    if sell_info:
-        sell_order_id = sell_info['sell_order_id']
-        cancel_response = cancel_order(sell_order_id)
-        if cancel_response and 'uuid' in cancel_response:
-            logger.info(f"매도 주문 취소됨: 주문 ID {sell_order_id}")
-            del sell_orders[buy_id]
-        else:
-            logger.warning(f"매도 주문 취소 실패: 주문 ID {sell_order_id}")
-
-    # 새로운 매도 주문 분배 (예: 3개의 주문으로 분할)
-    num_new_orders = 3
-    spread_percentage = 0.03  # 3% 범위
-
-    for i in range(1, num_new_orders + 1):
-        # 각 주문의 가격 설정 (예: 균등 분할)
-        new_price = target_price * (1 + (-spread_percentage/2) + (spread_percentage/(num_new_orders - 1)) * (i - 1))
-
-        # 매도 주문 금액 검증
-        total_sell_amount = new_price * (volume / num_new_orders)
-        if total_sell_amount < MIN_BUY_AMOUNT_KRW:
-            logger.warning(f"재분배 매도 주문 금액 {total_sell_amount:.2f} KRW이 최소 주문 금액 {MIN_BUY_AMOUNT_KRW} KRW을 충족하지 못합니다. 주문을 걸지 않습니다.")
-            continue
-
-        # 매도 주문 수량
-        sell_volume = volume / num_new_orders
-        sell_volume = round(sell_volume, 6)
-
-        # 가격을 tick size에 맞게 반올림
-        sell_price_rounded = round_price(new_price, get_tick_size(new_price))
-
-        # 매도 주문 생성
-        response_sell = place_order('KRW-SEI', 'ask', sell_volume, sell_price_rounded, linked_order_id=buy_id, ord_type='limit')
-
-        if response_sell and 'uuid' in response_sell:
-            new_sell_order_id = response_sell['uuid']
-            sell_orders[buy_id] = {
-                'sell_order_id': new_sell_order_id,
-                'buy_price': total_position['average_price'],
-                'volume': sell_volume,
-                'target_price': sell_price_rounded,
-                'created_at': datetime.now(timezone.utc)
-            }
-            logger.info(f"재분배 매도 주문 생성됨: 주문 ID {new_sell_order_id}, 가격: {sell_price_rounded:.2f}원, 수량: {sell_volume} SEI")
-        else:
-            logger.warning(f"재분배 매도 주문 생성 실패: 가격: {sell_price_rounded:.2f}원, 수량: {sell_volume} SEI")
-
-# 주문 상태를 지속적으로 모니터링하고 관리하는 함수
-def monitor_sell_orders():
-    global sell_orders, trade_session_counter, trade_in_progress, trading_paused, total_buys, total_sells, cumulative_profit, total_invested, last_sell_fill_time
-    while True:
-        try:
-            time.sleep(5)  # 5초마다 매도 주문 상태 확인
-            with open_order_lock():
-                for buy_id, sell_info in list(sell_orders.items()):
-                    sell_id = sell_info['sell_order_id']
-                    buy_price = sell_info['buy_price']
-                    volume = sell_info['volume']
-                    target_price = sell_info.get('target_price', buy_price * PROFIT_TARGET_RATE)
-                    status = check_order_status(sell_id, 'ask')
-                    if status:
-                        state = status.get('state')
-                        if state == 'done':
-                            sell_price = float(status.get('price'))
-
-                            # 누적 변수 업데이트 및 로그 출력
-                            with totals_lock:
-                                total_buys += buy_price * volume
-                                total_sells += sell_price * volume
-                                fee_buy = buy_price * 0.0005  # 매수 수수료
-                                fee_sell = sell_price * 0.0005  # 매도 수수료
-                                profit = (sell_price - buy_price - (fee_buy + fee_sell)) * volume
-                                cumulative_profit += profit
-                                
-                                # **매도 완료 시 투자 금액 복구**
-                                total_invested -= (buy_price * volume)
-                                if total_invested < 0:
-                                    logger.warning(f"총 투자 금액이 음수가 되었습니다: {total_invested}. 0으로 초기화합니다.")
-                                    total_invested = 0.0
-
-                                # 누적 요약 로그
-                                trade_log = (
-                                    "----------------------------------------------------------------------\n"
-                                    f"{trade_session_counter}번 거래 세션에서\n"
-                                    f"{buy_price:.2f}원 매수\n"
-                                    f"{sell_price:.2f}원 매도 완료.\n"
-                                    f"누적 매수 총액: {total_buys:.2f}원\n"
-                                    f"누적 매도 총액: {total_sells:.2f}원\n"
-                                    f"누적 순이익: {cumulative_profit:.2f}원\n"
-                                    f"현재 사용 가능한 시드: {SEED_AMOUNT - total_invested:.2f}원\n"
-                                    "----------------------------------------------------------------------"
-                                )
-
-                            logger.info(trade_log)
-
-                            # 마지막 매도 체결 시간 업데이트
-                            with last_sell_fill_time_lock:
-                                last_sell_fill_time = datetime.now(timezone.utc)
-
-                            # 추적 중인 매도 주문에서 제거
-                            del sell_orders[buy_id]
-                            trade_session_counter += 1
-
-                            # 거래 완료 시 플래그 해제
-                            with trade_lock:
-                                trade_in_progress = False
-
-                        elif state in ['wait', 'open']:
-                            # 목표 가격 도달 여부 확인
-                            current_market_price = get_current_market_price('KRW-SEI')
-                            if current_market_price and current_market_price >= target_price:
-                                new_sell_price = current_market_price  # 현재 시장 가격으로 설정
-                                tick_size = get_tick_size(new_sell_price)
-                                rounded_new_sell_price = round_price(new_sell_price, tick_size)
-
-                                logger.debug(f"목표 수익률 도달 시 매도 주문 조정: {rounded_new_sell_price:.2f}원 (틱 사이즈: {tick_size})")
-
-                                # 매도 주문 재조정을 위해 매도 주문 취소 및 재등록
-                                cancel_order(sell_id)
-                                response_new_sell = place_sell_order_on_buy(buy_id, buy_price, volume, new_sell_price=rounded_new_sell_price)
-                                if response_new_sell and 'uuid' in response_new_sell:
-                                    new_sell_order_id = response_new_sell['uuid']
-                                    sell_orders[buy_id]['sell_order_id'] = new_sell_order_id
-                                    sell_orders[buy_id]['target_price'] = rounded_new_sell_price
-                                    sell_orders[buy_id]['created_at'] = datetime.now(timezone.utc)
-                                    logger.info(f"목표 수익률 도달에 따른 매도 주문 생성됨: {rounded_new_sell_price:.2f}원, 주문 ID: {new_sell_order_id}")
-                                else:
-                                    logger.warning(f"매도 주문 재설정 실패: {rounded_new_sell_price:.2f}원, 수량: {volume} SEI, 매수 주문 ID: {buy_id}")
-
-                        elif state in ['cancelled', 'failed']:
-                            logger.info(f"매도 주문 취소됨: 주문 ID {sell_id}, 상태: {state}")
-                            del sell_orders[buy_id]
-                            # 거래 실패 시 플래그 해제
-                            with trade_lock:
-                                trade_in_progress = False
-        except Exception as e:
-            logger.debug(f"매도 주문 모니터링 중 오류 발생: {e}")
-
-# 손절 및 수익 실현 관리 함수 추가
-def monitor_average_price_and_take_profit_and_stop_loss():
-    """
-    평균 매수가를 모니터링하고, 수익 실현 및 손절 조건을 관리하는 함수
-    """
-    while True:
-        try:
-            with position_lock:
-                average_price = total_position['average_price']
-                total_volume = total_position['total_volume']
-
-            if total_volume == 0:
-                time.sleep(10)
-                continue
-
-            current_price = get_current_market_price('KRW-SEI')
-            if current_price is None:
-                logger.debug("현재 시장 가격을 가져올 수 없습니다.")
-                time.sleep(10)
-                continue
-
-            loss_percentage = ((average_price - current_price) / average_price) * 100
-            profit_percentage = ((current_price - average_price) / average_price) * 100
-
-            logger.debug(f"평균 매수가: {average_price:.2f}원, 현재 가격: {current_price:.2f}원, 손실 비율: {loss_percentage:.2f}%, 수익 비율: {profit_percentage:.2f}%")
-
-            # 수익 실현 로직
-            if profit_percentage >= (PROFIT_TARGET_RATE * 100):
-                logger.info(f"수익 목표 도달: 현재 가격이 평균 매수가의 {PROFIT_TARGET_RATE*100}% 이상입니다. 모든 매도 주문을 취소하고 지정가 매도 주문을 생성합니다.")
-                take_profit_and_monitor()
-
-            # 손절 로직
-            if loss_percentage >= STOP_LOSS_START:
-                # 손절 단계 계산
-                loss_step = int((loss_percentage - STOP_LOSS_START) // STOP_LOSS_STEP) + 1
-                current_stop_loss = STOP_LOSS_START + (STOP_LOSS_STEP * loss_step)
-
-                if current_stop_loss > STOP_LOSS_MAX:
-                    current_stop_loss = STOP_LOSS_MAX
-
-                target_loss_price = average_price * (1 - (current_stop_loss / 100))
-
-                # 해당 손실 비율에 해당하는 매도 주문 찾기
-                amount_to_sell = (total_invested * (current_stop_loss / 100))
-                amount_sold = 0.0
-
-                with open_order_lock():
-                    # 매도 주문을 가격이 낮은 순서대로(가장 낮은 가격 주문 먼저) 처리
-                    sorted_sell_orders = sorted(sell_orders.items(), key=lambda x: x[1]['target_price'])  # 가격 기준 정렬
-
-                    for buy_id, sell_info in sorted_sell_orders:
-                        if amount_sold >= amount_to_sell:
-                            break
-                        sell_id = sell_info['sell_order_id']
-                        sell_price = sell_info['target_price']
-                        volume = sell_info['volume']
-                        # 목표 손실 가격 이하인 매도 주문 취소
-                        if sell_price <= target_loss_price:
-                            cancel_response = cancel_order(sell_id)
-                            if cancel_response and 'uuid' in cancel_response:
-                                logger.info(f"손절을 위해 매도 주문 취소됨: 주문 ID {sell_id}, 가격: {sell_price:.2f}원, 수량: {volume} SEI")
-                                # 해당 매도 주문을 시장가로 매도
-                                market_sell_response = place_order('KRW-SEI', 'ask', volume, None, linked_order_id=None, ord_type='price')
-                                if market_sell_response and 'uuid' in market_sell_response:
-                                    logger.info(f"시장가 매도 주문 생성됨: 주문 ID {market_sell_response.get('uuid')}, 수량: {volume} SEI")
-                                    # 누적 손실 계산
-                                    amount_sold += (average_price - current_price) * volume
-                                    # 기존 sell_orders에서 제거
-                                    del sell_orders[buy_id]
-                                else:
-                                    logger.warning(f"시장가 매도 주문 생성 실패: 주문 ID {sell_id}, 수량: {volume} SEI")
-                    logger.debug(f"손절을 위해 매도하려는 총 금액: {amount_to_sell}원, 실제 매도된 금액: {amount_sold}원")
-
-            # 3% 이상의 하락 시 매도 주문 재분배
-            for buy_id, sell_info in list(sell_orders.items()):
-                sell_price = sell_info['target_price']
-                # 현재 시장 가격이 매도 가격보다 3% 이상 하락했는지 확인
-                if current_price <= sell_price * (1 - ADDITIONAL_STOP_LOSS_RATE):
-                    logger.info(f"현재 가격이 매도 가격보다 {ADDITIONAL_STOP_LOSS_RATE*100}% 이상 하락하였습니다: {current_price:.2f}원 <= {sell_price:.2f}원")
-                    redistribute_sell_orders(buy_id, sell_price, sell_info['volume'])
-
-            time.sleep(30)  # 30초 간격으로 모니터링
-        except Exception as e:
-            logger.debug(f"손절 및 수익 실현 관리 중 오류 발생: {e}")
-            time.sleep(30)
-
 # 전체 매도 주문을 취소하는 함수
 def cancel_all_sell_orders():
     """
@@ -1547,7 +1013,7 @@ def cancel_all_sell_orders():
                 else:
                     logger.warning(f"매도 주문 취소 실패: 주문 ID {order_id}")
 
-# 미체결 주문 관리 함수 수정
+# 미체결 주문 관리 함수
 def manage_open_orders():
     global trading_paused  # 전역 변수 사용
     while True:
@@ -1656,7 +1122,7 @@ def real_time_order_scheduler():
             logger.debug(f"실시간 주문 스케줄러 오류 발생: {e}")
             time.sleep(60)  # 오류 발생 시 대기 후 재시도
 
-# 미체결 매도 주문이 3분 동안 체결되지 않았을 경우, 오래된 주문 2개 취소하는 함수 추가
+# 미체결 주문 관리 함수 추가
 def cancel_unfilled_sells_if_no_fills():
     """
     3분 간격으로 매도 주문이 하나도 체결되지 않았다면, 가장 오래된 미체결 매도 주문 2개(가능하면)를 취소하고 일반 매매를 재개합니다.
@@ -1739,20 +1205,7 @@ def cancel_unfilled_sells_if_no_fills():
         except Exception as e:
             logger.debug(f"미체결 매도 주문 취소 중 오류 발생: {e}")
 
-# 잔고 동기화 스레드 추가
-def balance_sync_thread():
-    while True:
-        try:
-            current_balance = get_current_krw_balance()
-            current_sei_balance = get_current_sei_balance()
-            logger.debug(f"잔고 동기화 - 현재 잔고: {current_balance:.2f} KRW, {current_sei_balance:.6f} SEI")
-            # 필요한 경우, 로컬 변수나 기타 상태를 업데이트
-            # 예를 들어, 거래 일시 중지 여부를 업데이트할 수도 있습니다
-        except Exception as e:
-            logger.debug(f"잔고 동기화 중 오류 발생: {e}")
-        time.sleep(30)  # 30초마다 잔고 동기화
-
-# 실시간 주문 스케줄러 시작과 매도 주문 모니터링, 미체결 주문 관리 스레드 시작
+# 실시간 주문 스케줄러와 매도 주문 모니터링, 미체결 주문 관리, 잔고 동기화, 손절 및 수익 실현 관리, 미체결 매도 주문 취소 스레드를 시작하는 함수
 def start_threads():
     # 매도 주문 상태 모니터링 스레드 시작
     monitor_sell_thread = threading.Thread(target=monitor_sell_orders, name="MonitorSellOrders")
@@ -1783,12 +1236,6 @@ def start_threads():
     stop_loss_take_profit_thread.daemon = True
     stop_loss_take_profit_thread.start()
     logger.debug("손절 및 수익 실현 관리 스레드가 시작되었습니다.")
-
-    # 수익 실현 지정가 매도 주문 예약 스레드 시작
-    profit_sell_thread = threading.Thread(target=schedule_profit_sell_order, name="ProfitSellScheduler")
-    profit_sell_thread.daemon = True
-    profit_sell_thread.start()
-    logger.debug("수익 실현 지정가 매도 주문 예약 스레드가 시작되었습니다.")
 
     # 미체결 매도 주문 취소 스레드 시작
     cancel_unfilled_sell_thread = threading.Thread(target=cancel_unfilled_sells_if_no_fills, name="CancelUnfilledSellsIfNoFills")
