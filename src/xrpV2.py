@@ -48,7 +48,7 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 # 시드 금액 설정
-SEED_AMOUNT = 300000.0  # 단위: KRW
+SEED_AMOUNT = 50000.0  # 단위: KRW
 
 # 틱 사이즈 고정 (리플은 약 800원 대이므로 0.1으로 고정)
 def get_tick_size(price):
@@ -69,6 +69,7 @@ def is_profit_possible(buy_price, sell_price, fee_rate=0.0005):
 
 # 전역 변수 및 데이터 구조
 sell_orders = {}  # {buy_order_id: {'sell_order_id': sell_id, 'buy_price': buy_price, 'volume': volume, 'sell_price': sell_price}}
+buy_orders = {}   # {buy_order_id: {'price': buy_price, 'volume': volume, 'timestamp': datetime_object}}
 last_order_time = datetime.min.replace(tzinfo=timezone.utc)  # 마지막 주문 시간 초기화
 trade_session_counter = 1  # 거래 세션 번호 초기화
 trade_in_progress = False  # 현재 거래 진행 중 여부
@@ -214,7 +215,12 @@ def place_order(market, side, volume, price, linked_order_id=None, ord_type='lim
         if order_id:
             if side == 'bid':
                 # 매수 주문 개별 로그 제거
-                pass  # 로그 제거
+                buy_orders[order_id] = {
+                    'price': float(price),
+                    'volume': float(volume),
+                    'timestamp': datetime.now(timezone.utc)
+                }
+                logger.debug(f"매수 주문 생성됨: {price:.2f}원, 수량: {volume} XRP, 주문 ID: {order_id}")
             elif side == 'ask' and linked_order_id:
                 sell_orders[linked_order_id] = {
                     'sell_order_id': order_id,
@@ -517,6 +523,70 @@ def wait_and_place_sell_order(buy_order_id, buy_price, volume):
                 break
         time.sleep(5)  # 5초 간격으로 상태 확인
 
+# 매수 주문 모니터링 및 조정 함수
+def monitor_buy_orders():
+    global buy_orders, trade_in_progress
+    while True:
+        try:
+            time.sleep(5)  # 5초마다 매수 주문 상태 확인
+            with open_order_lock():
+                for buy_id, buy_info in list(buy_orders.items()):
+                    price = buy_info['price']
+                    volume = buy_info['volume']
+                    timestamp = buy_info['timestamp']
+                    
+                    # 주문 상태 확인
+                    status = check_order_status(buy_id, 'bid')
+                    if status:
+                        state = status.get('state')
+                        if state == 'done':
+                            logger.info(f"매수 주문 체결됨: 주문 ID {buy_id}, 가격: {price:.2f}원, 수량: {volume} XRP")
+                            # 매도 주문 스레드 시작
+                            threading.Thread(target=wait_and_place_sell_order, args=(buy_id, price, volume), daemon=True).start()
+                            del buy_orders[buy_id]
+                        elif state in ['cancelled', 'failed']:
+                            logger.info(f"매수 주문 취소됨: 주문 ID {buy_id}, 상태: {state}")
+                            del buy_orders[buy_id]
+                            with trade_lock:
+                                trade_in_progress = False
+                        elif state == 'wait':
+                            # 호가창을 조회하여 더 유리한 가격 확인
+                            orderbook = fetch_orderbook('KRW-XRP')
+                            if not orderbook:
+                                continue
+                            bids, asks = process_orderbook(orderbook)
+                            if not bids or not asks:
+                                continue
+                            
+                            current_best_bid = bids[0]['price']
+                            current_best_ask = asks[0]['price']
+                            
+                            # 현재 매수 예정인 가격보다 더 높은 또는 낮은 가격에 새로운 벽이 세워졌는지 확인
+                            # 여기서는 매수 가격을 더 낮게 조정
+                            # 필요에 따라 매수 가격을 더 높게 조정할 수도 있습니다
+                            new_buy_price = current_best_bid + get_tick_size(current_best_bid)
+                            
+                            if new_buy_price < price:
+                                # 더 낮은 가격으로 매수 주문을 재조정
+                                logger.info(f"매수 주문 가격 조정 필요: 기존 가격 {price:.2f}원 -> 새로운 가격 {new_buy_price:.2f}원")
+                                cancel_order(buy_id)
+                                with trade_lock:
+                                    trade_in_progress = False
+                                # 새로운 매수 주문 걸기
+                                response_new_buy = place_order('KRW-XRP', 'bid', volume, new_buy_price)
+                                if response_new_buy and 'uuid' in response_new_buy:
+                                    new_buy_id = response_new_buy['uuid']
+                                    buy_orders[new_buy_id] = {
+                                        'price': new_buy_price,
+                                        'volume': volume,
+                                        'timestamp': datetime.now(timezone.utc)
+                                    }
+                                    logger.info(f"새로운 매수 주문 생성됨: 주문 ID {new_buy_id}, 가격: {new_buy_price:.2f}원, 수량: {volume} XRP")
+                                else:
+                                    logger.debug(f"새로운 매수 주문 생성 실패: 가격 {new_buy_price:.2f}원, 수량: {volume} XRP")
+        except Exception as e:
+            logger.debug(f"매수 주문 모니터링 중 오류 발생: {e}")
+
 # 매수 및 매도 주문 실행 함수 (오더북 기반 단타 매매)
 def execute_orderbook_based_trading():
     global last_order_time, trade_in_progress, trading_paused, total_invested
@@ -591,7 +661,6 @@ def execute_orderbook_based_trading():
                 buy_order_id = response_buy['uuid']
                 last_order_time = datetime.now(timezone.utc)  # 주문 시간 업데이트
                 logger.debug(f"매수 주문 체결 대기: 매수 가격 {buy_price:.2f}원, 수량: {volume} XRP, 주문 ID {buy_order_id}")
-                threading.Thread(target=wait_and_place_sell_order, args=(buy_order_id, buy_price, volume), daemon=True).start()
                 # 투자 금액 누적
                 with totals_lock:
                     total_invested += buy_amount
@@ -615,7 +684,7 @@ def real_time_order_scheduler():
             logger.debug(f"실시간 주문 스케줄링 중 오류 발생: {e}")
         time.sleep(1)  # 1초 간격으로 체크
 
-# 매도 주문 상태 확인 및 관리 함수 수정
+# 매도 주문 상태 확인 및 관리 함수
 def monitor_sell_orders():
     global sell_orders, trade_session_counter, trade_in_progress, trading_paused, total_buys, total_sells, cumulative_profit, total_invested
     while True:
@@ -703,7 +772,7 @@ def monitor_sell_orders():
         except Exception as e:
             logger.debug(f"매도 주문 모니터링 중 오류 발생: {e}")
 
-# 미체결 주문 관리 함수 수정
+# 미체결 주문 관리 함수
 def manage_open_orders():
     global trading_paused
     while True:
@@ -784,13 +853,19 @@ def balance_sync_thread():
             logger.debug(f"잔고 동기화 중 오류 발생: {e}")
         time.sleep(30)  # 30초마다 잔고 동기화
 
-# 실시간 주문 스케줄러 시작과 매도 주문 모니터링, 미체결 주문 관리 스레드 시작
+# 실시간 주문 스케줄러 시작과 매도 주문 모니터링, 미체결 주문 관리, 매수 주문 모니터링 스레드 시작
 def start_threads():
     # 매도 주문 상태 모니터링 스레드 시작
     monitor_sell_thread = threading.Thread(target=monitor_sell_orders, name="MonitorSellOrders")
     monitor_sell_thread.daemon = True
     monitor_sell_thread.start()
     logger.debug("매도 주문 모니터링 스레드가 시작되었습니다.")
+
+    # 매수 주문 모니터링 스레드 시작
+    monitor_buy_thread = threading.Thread(target=monitor_buy_orders, name="MonitorBuyOrders")
+    monitor_buy_thread.daemon = True
+    monitor_buy_thread.start()
+    logger.debug("매수 주문 모니터링 스레드가 시작되었습니다.")
 
     # 실시간 주문 스케줄러 스레드 시작
     real_time_order_thread = threading.Thread(target=real_time_order_scheduler, name="RealTimeOrderScheduler")
