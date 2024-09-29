@@ -48,7 +48,7 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(console_handler)
 
 # 시드 금액 설정
-SEED_AMOUNT = 50000.0  # 단위: KRW
+SEED_AMOUNT = 300000.0  # 단위: KRW
 
 # 틱 사이즈 고정 (리플은 약 800원 대이므로 0.1으로 고정)
 def get_tick_size(price):
@@ -353,6 +353,7 @@ def cancel_order(order_id):
     try:
         response = requests.delete(url, params=query, headers=headers, timeout=10)
         response.raise_for_status()
+
         data = response.json()
         logger.info(f"주문 취소됨: 주문 ID {order_id}")
         return data
@@ -419,6 +420,9 @@ def process_orderbook(orderbook):
         for unit in orderbook_units:
             bids.append({'price': float(unit['bid_price']), 'size': float(unit['bid_size'])})
             asks.append({'price': float(unit['ask_price']), 'size': float(unit['ask_size'])})
+        # 매수 호가는 내림차순, 매도 호가는 오름차순으로 정렬
+        bids.sort(key=lambda x: x['price'], reverse=True)
+        asks.sort(key=lambda x: x['price'])
         return bids, asks
     except (KeyError, TypeError, IndexError, ValueError) as e:
         logger.debug(f"주문서 데이터 처리 중 오류 발생: {e}")
@@ -485,10 +489,16 @@ def wait_and_place_sell_order(buy_order_id, buy_price, volume):
                 highest_ask = max(asks, key=lambda x: x['size'])
                 sell_price = highest_ask['price'] - get_tick_size(highest_ask['price'])
 
-                # 호가의 갭 확인
-                gap = highest_ask['price'] - highest_ask['price']  # 이 부분은 의미가 없습니다. 아마 다른 조건을 원하신 것 같습니다.
-                if gap < get_tick_size(highest_ask['price']):
-                    logger.debug("호가 갭이 최소 틱보다 작아 매도 주문을 생성하지 않습니다.")
+                # 호가의 갭 확인 (예: 최고 매도 호가와 그 다음 매도 호가의 차이)
+                if len(asks) >= 2:
+                    gap = asks[1]['price'] - asks[0]['price']  # 두 번째 매도 호가 - 최고 매도 호가
+                    if gap < get_tick_size(highest_ask['price']):
+                        logger.debug("호가 갭이 최소 틱보다 작아 매도 주문을 생성하지 않습니다.")
+                        with trade_lock:
+                            trade_in_progress = False
+                        break
+                else:
+                    logger.debug("호가 갭 계산을 위한 충분한 매도 호가가 없습니다.")
                     with trade_lock:
                         trade_in_progress = False
                     break
@@ -530,7 +540,8 @@ def execute_orderbook_based_trading():
     with trading_pause_lock:
         if trading_paused:
             logger.info("거래가 일시 중지 상태입니다.")
-            trade_in_progress = False
+            with trade_lock:
+                trade_in_progress = False
             return
 
     try:
