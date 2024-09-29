@@ -13197,3 +13197,50 @@
 2024-09-29 17:38:29,990 - ERROR - 주문 생성 실패: None
 2024-09-29 17:38:30,306 - INFO - 프로그램을 종료합니다...
 2024-09-29 17:38:30,991 - INFO - 트레이딩 봇 종료
+2024-09-29 18:30:24,709 - INFO - 트레이딩 봇 시작
+2024-09-29 18:30:25,435 - ERROR - API 요청 오류: 401 Client Error: Unauthorized for url: https://api.upbit.com/v1/orders | URL: https://api.upbit.com/v1/orders | 메서드: POST
+2024-09-29 18:30:25,435 - ERROR - 주문 생성 실패: None
+2024-09-29 18:30:26,665 - ERROR - API 요청 오류: 401 Client Error: Unauthorized for url: https://api.upbit.com/v1/orders | URL: https://api.upbit.com/v1/orders | 메서드: POST
+2024-09-29 18:30:26,665 - ERROR - 주문 생성 실패: None
+2024-09-29 18:30:27,910 - ERROR - API 요청 오류: 401 Client Error: Unauthorized for url: https://api.upbit.com/v1/orders | URL: https://api.upbit.com/v1/orders | 메서드: POST
+2024-09-29 18:30:27,910 - ERROR - 주문 생성 실패: None
+2024-09-29 18:30:29,776 - INFO - 프로그램을 종료합니다...
+2024-09-29 18:30:30,247 - INFO - 프로그램을 종료합니다...
+2024-09-29 18:30:30,365 - ERROR - API 요청 오류: 401 Client Error: Unauthorized for url: https://api.upbit.com/v1/orders | URL: https://api.upbit.com/v1/orders | 메서드: POST
+2024-09-29 18:30:30,366 - ERROR - 주문 생성 실패: None
+2024-09-29 18:30:31,368 - INFO - 트레이딩 봇 종료
+2024-09-29 18:30:37,740 - DEBUG - 매도 주문 모니터링 스레드가 시작되었습니다.
+2024-09-29 18:30:37,741 - DEBUG - 실시간 주문 스케줄러 스레드가 시작되었습니다.
+2024-09-29 18:30:37,741 - DEBUG - 미체결 주문 관리 스레드가 시작되었습니다.
+2024-09-29 18:30:37,741 - DEBUG - 잔고 동기화 스레드가 시작되었습니다.
+2024-09-29 18:30:37,742 - INFO - 트레이딩 봇이 오더북 기반 매수 및 매도 전략으로 실행 중입니다. 종료하려면 Ctrl+C를 누르세요.
+2024-09-29 18:30:37,980 - DEBUG - 현재 KRW 잔고: 956876.60612352원
+2024-09-29 18:30:37,980 - DEBUG - 잔고 동기화 - 현재 잔고: 956876.61원
+2024-09-29 18:30:38,366 - DEBUG - 현재 KRW 잔고: 956876.60612352원
+2024-09-29 18:30:38,586 - DEBUG - 매수 주문 체결 대기: 매수 가격 880.30원, 수량: 11.359764 UXLINK, 주문 ID: ea5f342d-1a06-42eb-9529-29025b3480b5
+2024-09-29 18:30:38,778 - DEBUG - 현재 KRW 잔고: 946871.60587419원
+2024-09-29 18:30:38,987 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"name":"invalid_price_bid","message":"주문가격 단위를 잘못 입력하셨습니다. 확인 후 시도해주세요."}}
+2024-09-29 18:30:38,987 - DEBUG - 매수 주문 실행 실패 (매수 주문 ID 없음).
+2024-09-29 18:30:39,205 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"message":"주문가능한 금액(UXLINK)이 부족합니다.","name":"insufficient_funds_ask"}}
+2024-09-29 18:30:39,205 - DEBUG - 매도 주문 실행 실패 (매도 주문 ID 없음).
+2024-09-29 18:30:39,488 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"name":"insufficient_funds_ask","message":"주문가능한 금액(UXLINK)이 부족합니다."}}
+2024-09-29 18:30:39,488 - DEBUG - 매도 주문 실행 실패 (매도 주문 ID 없음).
+2024-09-29 18:30:41,585 - DEBUG - 현재 KRW 잔고: 946871.60587419원
+2024-09-29 18:30:41,929 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"message":"주문가격 단위를 잘못 입력하셨습니다. 확인 후 시도해주세요.","name":"invalid_price_bid"}}
+2024-09-29 18:30:41,930 - DEBUG - 매수 주문 실행 실패 (매수 주문 ID 없음).
+2024-09-29 18:30:42,264 - DEBUG - 현재 KRW 잔고: 946871.60587419원
+2024-09-29 18:30:42,623 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"message":"주문가격 단위를 잘못 입력하셨습니다. 확인 후 시도해주세요.","name":"invalid_price_bid"}}
+2024-09-29 18:30:42,624 - DEBUG - 매수 주문 실행 실패 (매수 주문 ID 없음).
+2024-09-29 18:30:43,314 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"message":"주문가능한 금액(UXLINK)이 부족합니다.","name":"insufficient_funds_ask"}}
+2024-09-29 18:30:43,314 - DEBUG - 매도 주문 실행 실패 (매도 주문 ID 없음).
+2024-09-29 18:30:43,943 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"message":"주문가능한 금액(UXLINK)이 부족합니다.","name":"insufficient_funds_ask"}}
+2024-09-29 18:30:43,943 - DEBUG - 매도 주문 실행 실패 (매도 주문 ID 없음).
+2024-09-29 18:30:45,924 - DEBUG - 이미 매수 주문이 걸려있는 가격: 880.30원
+2024-09-29 18:30:46,230 - DEBUG - 현재 KRW 잔고: 946871.60587419원
+2024-09-29 18:30:46,505 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"name":"invalid_price_bid","message":"주문가격 단위를 잘못 입력하셨습니다. 확인 후 시도해주세요."}}
+2024-09-29 18:30:46,505 - DEBUG - 매수 주문 실행 실패 (매수 주문 ID 없음).
+2024-09-29 18:30:46,947 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"name":"insufficient_funds_ask","message":"주문가능한 금액(UXLINK)이 부족합니다."}}
+2024-09-29 18:30:46,947 - DEBUG - 매도 주문 실행 실패 (매도 주문 ID 없음).
+2024-09-29 18:30:47,214 - DEBUG - HTTP 오류 발생: 400 Client Error: Bad Request for url: https://api.upbit.com/v1/orders - 응답: {"error":{"name":"insufficient_funds_ask","message":"주문가능한 금액(UXLINK)이 부족합니다."}}
+2024-09-29 18:30:47,215 - DEBUG - 매도 주문 실행 실패 (매도 주문 ID 없음).
+2024-09-29 18:30:47,850 - INFO - 사용자에 의해 트레이딩 봇이 중지되었습니다.
