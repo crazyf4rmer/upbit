@@ -97,7 +97,28 @@ def open_order_lock():
         file_lock.release()
 
 def get_tick_size(price):
-    return 0.1
+    if price < 10:
+        return 0.01
+    elif price < 100:
+        return 0.1
+    elif price < 1000:
+        return 1
+    elif price < 10000:
+        return 5
+    elif price < 100000:
+        return 10
+    elif price < 500000:
+        return 50
+    elif price < 1000000:
+        return 100
+    elif price < 2000000:
+        return 500
+    else:
+        return 1000
+
+def adjust_to_tick_size(price):
+    tick_size = get_tick_size(price)
+    return math.floor(price / tick_size) * tick_size
 
 def is_profit_possible(buy_price, sell_price, fee_rate=0.0005, min_profit_rate=0.002):
     profit = sell_price - buy_price - (sell_price + buy_price) * fee_rate
@@ -154,8 +175,10 @@ def place_order(market, side, volume, price, ord_type='limit'):
         response = requests.post(f"{server_url}/v1/orders", params=query, headers=headers)
         response.raise_for_status()
         return response.json()
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"주문 실행 중 오류 발생: {e}")
+        if hasattr(e.response, 'text'):
+            logger.error(f"오류 응답: {e.response.text}")
         return None
 
 def check_order_status(order_id):
@@ -233,14 +256,14 @@ def calculate_optimal_sell_price(buy_price, orderbook, min_profit_rate=0.002):
     valid_asks = [ask for ask in asks if float(ask['ask_price']) >= min_sell_price]
     
     if not valid_asks:
-        return min_sell_price
+        return adjust_to_tick_size(min_sell_price)
 
     volume_at_price = defaultdict(float)
     for ask in valid_asks:
         volume_at_price[float(ask['ask_price'])] += float(ask['ask_size'])
     
     optimal_price = max(volume_at_price, key=volume_at_price.get)
-    return optimal_price
+    return adjust_to_tick_size(optimal_price)
 
 def execute_buy_order(trading_manager):
     global available_seed, total_invested
@@ -252,7 +275,7 @@ def execute_buy_order(trading_manager):
 
     bids = orderbook['orderbook_units']
     best_bid = float(bids[0]['bid_price'])
-    buy_price = best_bid + get_tick_size(best_bid)
+    buy_price = adjust_to_tick_size(best_bid + get_tick_size(best_bid))
     buy_volume = 10  # 예시 수량, 실제로는 적절한 수량 계산 로직이 필요합니다.
 
     if available_seed >= buy_price * buy_volume:
