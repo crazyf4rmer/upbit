@@ -28,7 +28,7 @@ max_consecutive_failures = 3
 consecutive_failures = 0
 
 # 시드 금액 설정
-SEED_AMOUNT = 50000.0  # 단위: KRW
+SEED_AMOUNT = 100000.0  # 단위: KRW
 
 # 로깅 설정
 logger = logging.getLogger('trading_bot')
@@ -97,24 +97,11 @@ def open_order_lock():
         file_lock.release()
 
 def get_tick_size(price):
-    if price < 10:
-        return 0.01
-    elif price < 100:
+    
+    if price < 1000:
         return 0.1
-    elif price < 1000:
-        return 1
-    elif price < 10000:
-        return 5
-    elif price < 100000:
-        return 10
-    elif price < 500000:
-        return 50
-    elif price < 1000000:
-        return 100
-    elif price < 2000000:
-        return 500
     else:
-        return 1000
+        return 1
 
 def adjust_to_tick_size(price):
     tick_size = get_tick_size(price)
@@ -250,20 +237,58 @@ def fetch_orderbook(market):
         logger.error(f"오더북 조회 중 오류 발생: {e}")
         return None
 
+def calculate_optimal_buy_price(orderbook):
+    bids = orderbook['orderbook_units']
+    volume_at_price = defaultdict(float)
+    
+    for bid in bids:
+        price = float(bid['bid_price'])
+        volume = float(bid['bid_size'])
+        volume_at_price[price] += volume
+    
+    # 가격이 높은 순으로 정렬 (매수의 경우 높은 가격부터 체결되므로)
+    sorted_prices = sorted(volume_at_price.keys(), reverse=True)
+    
+    best_price = sorted_prices[0]
+    best_volume = volume_at_price[best_price]
+    
+    for price in sorted_prices[1:]:
+        if volume_at_price[price] > best_volume:
+            best_price = price
+            best_volume = volume_at_price[price]
+    
+    # 최적 가격에서 한 틱 위의 가격으로 조정
+    optimal_price = best_price + get_tick_size(best_price)
+    return adjust_to_tick_size(optimal_price)
+
 def calculate_optimal_sell_price(buy_price, orderbook, min_profit_rate=0.002):
     min_sell_price = buy_price * (1 + min_profit_rate)
     asks = orderbook['orderbook_units']
-    valid_asks = [ask for ask in asks if float(ask['ask_price']) >= min_sell_price]
-    
-    if not valid_asks:
-        return adjust_to_tick_size(min_sell_price)
-
     volume_at_price = defaultdict(float)
-    for ask in valid_asks:
-        volume_at_price[float(ask['ask_price'])] += float(ask['ask_size'])
     
-    optimal_price = max(volume_at_price, key=volume_at_price.get)
-    return adjust_to_tick_size(optimal_price)
+    for ask in asks:
+        price = float(ask['ask_price'])
+        volume = float(ask['ask_size'])
+        if price >= min_sell_price:
+            volume_at_price[price] += volume
+    
+    if not volume_at_price:
+        return adjust_to_tick_size(min_sell_price)
+    
+    # 가격이 낮은 순으로 정렬 (매도의 경우 낮은 가격부터 체결되므로)
+    sorted_prices = sorted(volume_at_price.keys())
+    
+    best_price = sorted_prices[0]
+    best_volume = volume_at_price[best_price]
+    
+    for price in sorted_prices[1:]:
+        if volume_at_price[price] > best_volume:
+            best_price = price
+            best_volume = volume_at_price[price]
+    
+    # 최적 가격에서 한 틱 아래의 가격으로 조정
+    optimal_price = best_price - get_tick_size(best_price)
+    return adjust_to_tick_size(max(optimal_price, min_sell_price))
 
 def execute_buy_order(trading_manager):
     global available_seed, total_invested
@@ -273,9 +298,7 @@ def execute_buy_order(trading_manager):
         logger.error("오더북 조회 실패")
         return
 
-    bids = orderbook['orderbook_units']
-    best_bid = float(bids[0]['bid_price'])
-    buy_price = adjust_to_tick_size(best_bid + get_tick_size(best_bid))
+    buy_price = calculate_optimal_buy_price(orderbook)
     buy_volume = 10  # 예시 수량, 실제로는 적절한 수량 계산 로직이 필요합니다.
 
     if available_seed >= buy_price * buy_volume:
@@ -296,6 +319,38 @@ def execute_buy_order(trading_manager):
     else:
         logger.debug(f"시드 금액 부족: 필요 금액 {buy_price * buy_volume:.2f}원, 사용 가능 금액 {available_seed:.2f}원")
 
+def adjust_buy_orders(trading_manager):
+    orderbook = fetch_orderbook('KRW-XRP')
+    if not orderbook:
+        logger.error("오더북 조회 실패")
+        return
+
+    optimal_buy_price = calculate_optimal_buy_price(orderbook)
+
+    for buy_order_id, order_pair in list(trading_manager.order_pairs.items()):
+        if order_pair.sell_order is None:  # 매수 주문만 있고 매도 주문이 없는 경우
+            current_buy_price = order_pair.buy_order['price']
+            if abs(optimal_buy_price - current_buy_price) > get_tick_size(current_buy_price):
+                # 현재 주문 취소
+                cancel_result = cancel_order(buy_order_id)
+                if cancel_result:
+                    logger.info(f"기존 매수 주문 취소: ID {buy_order_id}")
+                    
+                    # 새 주문 생성
+                    # 새 주문 생성
+                    new_buy_volume = order_pair.buy_order['volume']
+                    response_buy = place_order('KRW-XRP', 'bid', new_buy_volume, optimal_buy_price)
+                    if response_buy and 'uuid' in response_buy:
+                        new_buy_order_id = response_buy['uuid']
+                        new_buy_order = {'order_id': new_buy_order_id, 'price': optimal_buy_price, 'volume': new_buy_volume}
+                        trading_manager.remove_order_pair(buy_order_id)
+                        trading_manager.add_buy_order(new_buy_order, calculate_optimal_sell_price(optimal_buy_price, orderbook))
+                        logger.info(f"새 매수 주문 생성: ID {new_buy_order_id}, 가격: {optimal_buy_price:.2f}원, 수량: {new_buy_volume} XRP")
+                    else:
+                        logger.error("Upbit API 새 매수 주문 실패")
+                else:
+                    logger.error(f"매수 주문 취소 실패: ID {buy_order_id}")
+
 def adjust_sell_orders(trading_manager):
     orderbook = fetch_orderbook('KRW-XRP')
     if not orderbook:
@@ -303,23 +358,29 @@ def adjust_sell_orders(trading_manager):
         return
 
     for buy_order_id, order_pair in list(trading_manager.order_pairs.items()):
-        buy_order = order_pair.buy_order
-        current_sell_price = order_pair.current_sell_price
-        optimal_sell_price = calculate_optimal_sell_price(buy_order['price'], orderbook)
+        if order_pair.sell_order:
+            buy_price = order_pair.buy_order['price']
+            current_sell_price = order_pair.sell_order['price']
+            optimal_sell_price = calculate_optimal_sell_price(buy_price, orderbook)
 
-        if abs(optimal_sell_price - current_sell_price) > get_tick_size(current_sell_price):
-            if order_pair.sell_order:
-                cancel_order(order_pair.sell_order['order_id'])
-                logger.info(f"기존 매도 주문 취소: ID {order_pair.sell_order['order_id']}")
-
-            response_sell = place_order('KRW-XRP', 'ask', buy_order['volume'], optimal_sell_price)
-            if response_sell and 'uuid' in response_sell:
-                new_sell_order = {'order_id': response_sell['uuid'], 'price': optimal_sell_price, 'volume': buy_order['volume']}
-                trading_manager.update_sell_order(buy_order_id, new_sell_order)
-                order_pair.current_sell_price = optimal_sell_price
-                logger.info(f"새 매도 주문 생성: ID {new_sell_order['order_id']}, 가격: {optimal_sell_price:.2f}원, 수량: {buy_order['volume']} XRP")
-            else:
-                logger.error("Upbit API 매도 주문 실패")
+            if abs(optimal_sell_price - current_sell_price) > get_tick_size(current_sell_price):
+                # 현재 매도 주문 취소
+                cancel_result = cancel_order(order_pair.sell_order['order_id'])
+                if cancel_result:
+                    logger.info(f"기존 매도 주문 취소: ID {order_pair.sell_order['order_id']}")
+                    
+                    # 새 매도 주문 생성
+                    new_sell_volume = order_pair.sell_order['volume']
+                    response_sell = place_order('KRW-XRP', 'ask', new_sell_volume, optimal_sell_price)
+                    if response_sell and 'uuid' in response_sell:
+                        new_sell_order_id = response_sell['uuid']
+                        new_sell_order = {'order_id': new_sell_order_id, 'price': optimal_sell_price, 'volume': new_sell_volume}
+                        trading_manager.update_sell_order(buy_order_id, new_sell_order)
+                        logger.info(f"새 매도 주문 생성: ID {new_sell_order_id}, 가격: {optimal_sell_price:.2f}원, 수량: {new_sell_volume} XRP")
+                    else:
+                        logger.error("Upbit API 새 매도 주문 실패")
+                else:
+                    logger.error(f"매도 주문 취소 실패: ID {order_pair.sell_order['order_id']}")
 
 def monitor_orders(trading_manager):
     global total_invested, available_seed
@@ -416,8 +477,9 @@ def real_time_order_scheduler(trading_manager):
         try:
             with trading_pause_lock:
                 if not trading_paused:
-                    execute_buy_order(trading_manager)  # 매수 주문 실행
-                    adjust_sell_orders(trading_manager)   # 매도 주문 조정
+                    execute_buy_order(trading_manager)  # 새로운 매수 주문 실행
+                    adjust_buy_orders(trading_manager)  # 기존 매수 주문 조정
+                    adjust_sell_orders(trading_manager)  # 매도 주문 조정
             consecutive_failures = 0  # 성공적으로 실행되면 연속 실패 카운트 리셋
         except Exception as e:
             logger.error(f"실시간 주문 스케줄링 중 오류 발생: {e}", exc_info=True)
