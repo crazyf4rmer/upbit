@@ -643,25 +643,22 @@ def main():
     trading_manager = TradingManager()
     logger.info("트레이딩 봇 시작")
 
+    # 모니터링 및 주문 처리를 위한 스레드 시작
     threading.Thread(target=monitor_orders, args=(trading_manager,), daemon=True).start()
     threading.Thread(target=real_time_order_scheduler, args=(trading_manager,), daemon=True).start()
     threading.Thread(target=check_trading_status, daemon=True).start()
 
-    while True:
-        command = input("명령을 입력하세요 (pause/resume/enable_buy/disable_buy/exit): ").strip().lower()
-        if command == 'pause':
-            pause_trading()
-        elif command == 'resume':
-            resume_trading()
-        elif command == 'enable_buy':
-            enable_new_buy_orders()
-        elif command == 'disable_buy':
-            disable_new_buy_orders("사용자 명령")
-        elif command == 'exit':
-            logger.info("트레이딩 봇을 종료합니다.")
-            break
-        else:
-            logger.info("알 수 없는 명령입니다.")
+    try:
+        # 메인 스레드를 계속 실행 상태로 유지
+        while True:
+            time.sleep(60)  # 1분마다 깨어나서 계속 실행 중임을 로그에 기록
+            logger.info("트레이딩 봇 실행 중...")
+    except KeyboardInterrupt:
+        logger.info("트레이딩 봇 종료 요청을 받았습니다. 종료합니다.")
+    except Exception as e:
+        logger.error(f"예기치 않은 오류 발생: {e}", exc_info=True)
+    finally:
+        logger.info("트레이딩 봇을 종료합니다.")
 
 if __name__ == "__main__":
     main()
